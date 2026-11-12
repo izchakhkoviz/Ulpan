@@ -9,6 +9,7 @@ import { sendMail } from './mail.js';
 
 const STYLES = { '1': 'pop', '2': 'rock', '3': 'mizrahi', '4': 'ballad', '5': '' };
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const WAIT_ON_LINE = process.env.WAIT_ON_LINE === 'true';
 
 const app = express();
 app.use(express.json());
@@ -63,7 +64,7 @@ async function newSong(call, phone) {
     if (melodyBuf) melody = await describeMelody(melodyBuf).catch(() => '');
   }
 
-  // 4. מייל. אם כבר יש כתובת שמורה, מציעים להשתמש בה
+  // 4. מייל
   const saved = (await getCaller(phone)).email;
   let email = saved;
   if (!saved || (await tap(call, 'להשתמש בכתובת המייל ששמורה אצלנו הקישו 1. להזנת כתובת חדשה הקישו 2')) === '2') {
@@ -72,14 +73,20 @@ async function newSong(call, phone) {
     await saveEmail(phone, email);
   }
 
-  // 5. אישור והפעלה ברקע
+  // 5. אישור והפעלה
   if (await tap(call, 'לאישור ויצירת הסקיצה הקישו 1. לביטול הקישו 2') !== '1') return say(call, 'בוטל');
   const title = lyrics.split(/\s+/).slice(0, 4).join(' ');
   const id = await createSong({ phone, title, style, lyrics, status: 'pending' });
-  await say(call, 'תודה. הסקיצה בדרך למייל שלכם, זה ייקח כמה דקות');
 
-  // ההמשך רץ אחרי ניתוק השיחה
-  runSong({ id, email, lyrics, style, melody });
+  if (WAIT_ON_LINE) {
+    // המתנה על הקו עד שהשיר מוכן
+    await say(call, 'תודה. היצירה נמשכת כמה דקות, אנא המתינו על הקו');
+    const ok = await runSong({ id, email, lyrics, style, melody });
+    await say(call, ok ? 'הסקיצה נשלחה למייל שלכם. תודה ולהתראות' : 'מצטערים, לא הצלחנו ליצור את השיר. נשלחה הודעה למייל');
+  } else {
+    await say(call, 'תודה. הסקיצה בדרך למייל שלכם, זה ייקח כמה דקות');
+    runSong({ id, email, lyrics, style, melody }); // ברקע, אחרי ניתוק השיחה
+  }
 }
 
 async function runSong({ id, email, lyrics, style, melody }) {
@@ -95,10 +102,12 @@ async function runSong({ id, email, lyrics, style, melody }) {
     });
     await updateSong(id, { status: 'sent', sizeBytes: song.buf.length });
     console.log('SONG SENT', id);
+    return true;
   } catch (e) {
     console.error('SONG FAILED', id, e.message);
     await updateSong(id, { status: 'failed', error: String(e.message).slice(0, 200) }).catch(() => {});
     await sendMail({ to: email, subject: 'לא הצלחנו ליצור את השיר', text: 'מצטערים, היצירה נכשלה. נסו שוב מאוחר יותר.' }).catch(() => {});
+    return false;
   }
 }
 
